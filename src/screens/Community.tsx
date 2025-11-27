@@ -1,12 +1,12 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native'
 
-export default function DiscoverScreen() {
+export default function Community() {
   return (
     <View style={styles.container}>
-      <Text style={{ fontSize: 24 }}>Discover Page</Text>
+      <Text style={{fontSize: 24}}>Community</Text>
     </View>
-  );
+  )
 }
 
 const styles = StyleSheet.create({
@@ -15,5 +15,5 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: '#fff'
-  },
-});
+  }
+})

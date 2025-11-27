@@ -3,8 +3,10 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Platform } from 'react-native';
 
 import HomeScreen from '../screens/HomeScreen';
-import DiscoverScreen from '../screens/DiscoverScreen.tsx';
+import Messages from '../screens/Messages.tsx';
 import ProfileScreen from '../screens/ProfileScreen';
+import Community from '../screens/Community.tsx';
+import Library from '../screens/Library.tsx';
 
 const Tab = createBottomTabNavigator();
 
@@ -25,7 +27,7 @@ export default function BottomTabs() {
         tabBarActiveTintColor: '#0058A2',
         tabBarInactiveTintColor: '#999999',
         tabBarLabelStyle: {
-          fontSize: 20,
+          fontSize: 18,
           fontWeight: '500',
           margin: 0,
           ...Platform.select({
@@ -45,8 +47,10 @@ export default function BottomTabs() {
       }}
     >
       <Tab.Screen name="搜索" component={HomeScreen} />
-      <Tab.Screen name="发现" component={DiscoverScreen} />
-      <Tab.Screen name="我的" component={ProfileScreen} />
+      <Tab.Screen name="社区" component={Community} />
+      <Tab.Screen name="消息" component={Messages} />
+      <Tab.Screen name="念书" component={Library}/>
+      <Tab.Screen name="我" component={ProfileScreen} />      
     </Tab.Navigator>
   );
 }
