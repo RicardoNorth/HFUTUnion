@@ -4,7 +4,7 @@ import { View, Text, StyleSheet } from 'react-native';
 export default function Messages() {
   return (
     <View style={styles.container}>
-      <Text style={{fontSize: 24}}>message Page</Text>
+      <Text style={{fontSize: 24, fontFamily:'Inter-Bold'}}>message Page</Text>
     </View>
   );
 }
