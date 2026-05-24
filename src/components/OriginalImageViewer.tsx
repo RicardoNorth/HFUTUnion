@@ -223,25 +223,25 @@ function ProgressBar({
 
   useEffect(() => {
     if (loading && lengthUnknown) {
-      pulseLoopRef.current?.stop();
-      const loop = Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulse, {
-            toValue: 1,
-            duration: 900,
-            easing: Easing.inOut(Easing.quad),
-            useNativeDriver: true,
-          }),
-          Animated.timing(pulse, {
-            toValue: 0,
-            duration: 900,
-            easing: Easing.inOut(Easing.quad),
-            useNativeDriver: true,
-          }),
-        ]),
-      );
-      pulseLoopRef.current = loop;
-      loop.start();
+    pulseLoopRef.current?.stop();
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          toValue: 1,
+          duration: 900,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulse, {
+          toValue: 0,
+          duration: 900,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    pulseLoopRef.current = loop;
+    loop.start();
     } else {
       pulseLoopRef.current?.stop();
       pulse.setValue(0);
@@ -252,32 +252,32 @@ function ProgressBar({
   if (!loading) return null;
   return (
     <View style={[styles.progressWrap, { paddingBottom: Math.max(insetsBottom, 12) }]}>
-      <View style={styles.progressTrack}>
-        {lengthUnknown ? (
-          <Animated.View
-            style={[
-              styles.progressIndeterminate,
-              {
-                transform: [
+          <View style={styles.progressTrack}>
+            {lengthUnknown ? (
+              <Animated.View
+                style={[
+                  styles.progressIndeterminate,
                   {
-                    translateX: pulse.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [-120, 120],
-                    }),
+                    transform: [
+                      {
+                        translateX: pulse.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [-120, 120],
+                        }),
+                      },
+                    ],
                   },
-                ],
-              },
-            ]}
-          />
-        ) : (
-          <View style={[styles.progressFill, { width: `${Math.round(progress * 100)}%` }]} />
-        )}
-      </View>
-      <Text style={styles.progressLabel}>
+                ]}
+              />
+            ) : (
+              <View style={[styles.progressFill, { width: `${Math.round(progress * 100)}%` }]} />
+            )}
+          </View>
+          <Text style={styles.progressLabel}>
         {lengthUnknown
           ? '加载原图中…'
           : `加载原图 ${Math.min(100, Math.round(progress * 100))}%`}
-      </Text>
+          </Text>
     </View>
   );
 }

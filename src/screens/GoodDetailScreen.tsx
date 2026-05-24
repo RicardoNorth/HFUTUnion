@@ -445,6 +445,11 @@ export default function GoodDetailScreen({ route }: any) {
                 <Text style={styles.chipText}>{g.goods_type_label || '商品'}</Text>
               </View>
             )}
+            {g.is_batch ? (
+              <View style={[styles.chip, styles.chipBatch]}>
+                <Text style={[styles.chipText, styles.chipBatchText]}>批量上架</Text>
+              </View>
+            ) : null}
             {renderDeadlineBadge(g) ? (
               <View
                 style={[
@@ -609,6 +614,8 @@ const styles = StyleSheet.create({
   chipExpiredText: { color: colors.textMuted },
   chipBargain: { backgroundColor: '#FEF3C7' },
   chipBargainText: { color: '#B45309' },
+  chipBatch: { backgroundColor: '#EDE9FE' },
+  chipBatchText: { color: '#5B21B6' },
   meta: { fontSize: 13, color: colors.textSecondary },
   addr: { fontSize: 14, color: colors.textSecondary, marginTop: 8, lineHeight: 20, flex: 1 },
   addrRow: {

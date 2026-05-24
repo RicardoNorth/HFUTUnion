@@ -370,6 +370,13 @@ export default function GoodListScreen() {
                   <>
                     <Image source={{ uri: item.images[0] }} style={styles.cover} />
                     <View style={styles.tagStack}>
+                      {item.is_batch ? (
+                        <View style={[styles.typeTag, styles.typeTagBatch]}>
+                          <Text style={styles.typeTagText} numberOfLines={1}>
+                            批量上架
+                          </Text>
+                        </View>
+                      ) : null}
                       {item.goods_type_label ? (
                         <View style={styles.typeTag}>
                           <Text style={styles.typeTagText} numberOfLines={1}>
@@ -402,6 +409,13 @@ export default function GoodListScreen() {
                     </View>
                     <View style={styles.noCoverHeadMain}>
                       <View style={styles.inlineTagRow}>
+                        {item.is_batch ? (
+                          <View style={[styles.typeTagInline, styles.typeTagInlineBatch]}>
+                            <Text style={styles.typeTagInlineText} numberOfLines={1}>
+                              批量上架
+                            </Text>
+                          </View>
+                        ) : null}
                         {item.goods_type_label ? (
                           <View style={styles.typeTagInline}>
                             <Text style={styles.typeTagInlineText} numberOfLines={1}>
@@ -679,10 +693,12 @@ const styles = StyleSheet.create({
   typeTagHelp: { backgroundColor: '#F97316' },
   typeTagDeadline: { backgroundColor: '#F59E0B' },
   typeTagExpired: { backgroundColor: '#6B7280' },
+  typeTagBatch: { backgroundColor: '#7C3AED' }, // 紫色：合并聊天记录批量上架
   inlineTagRow: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
   typeTagInlineHelp: { backgroundColor: '#FFEDD5' },
   typeTagInlineDeadline: { backgroundColor: '#FEF3C7' },
   typeTagInlineExpired: { backgroundColor: '#F3F4F6' },
+  typeTagInlineBatch: { backgroundColor: '#EDE9FE' }, // 浅紫：批量上架（无图模式）
   title: { fontSize: 14, paddingHorizontal: 8, paddingTop: 8, color: colors.text, fontWeight: '500' },
   priceRow: {
     flexDirection: 'row',

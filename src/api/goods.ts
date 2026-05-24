@@ -66,6 +66,14 @@ export type GoodRow = {
   is_orphan_owner?: boolean;
   /** 配合 is_orphan_owner 使用：孤儿卖家的 QQ 号（字符串）；前端展示用 */
   seller_qq_number?: string;
+  /**
+   * 是否为合并聊天记录批量上架商品：
+   * - true：title 是多个商品名用中文逗号串联（如 "花瓶，喷壶，雨衣"），
+   *   价格统一面议，所有图片都属于这一个商品；前端商品卡片 + 详情页应显示"批量上架"tag。
+   * - false / 缺省：普通上架（app 直发或 bot 单商品识别）。
+   * 详见 QQ-bot prompt "聊天记录展开" 节 + migrate_goods_is_batch.sql。
+   */
+  is_batch?: boolean;
   created_at?: string;
 };
 
