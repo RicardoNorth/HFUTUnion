@@ -82,8 +82,12 @@ android {
         applicationId "com.hfutunion"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        // 版本号优先取自 -PappVersionName / -PappVersionCode（顶层 Makefile / build-apk.sh 注入）；
+        // 不带 -P 时回退到这里的默认值，保持本地 IDE 直接 ./gradlew assembleRelease 仍可用。
+        // 必须用 `versionCode =` 而不是 `versionCode (…)`——Groovy 命令链优先级会把后者解析为
+        // `versionCode(null) ?: '1'.toString().toInteger()`，导致 AGP 报 "Value is null"。
+        versionCode = ((project.findProperty('appVersionCode') ?: '1') as String).toInteger()
+        versionName = (project.findProperty('appVersionName') ?: '1.0') as String
         // release 默认会禁止明文 HTTP；接口为 http:// 时必须允许（见 res/xml/network_security_config.xml）
         manifestPlaceholders = [usesCleartextTraffic: "true"]
     }

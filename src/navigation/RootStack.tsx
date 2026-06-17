@@ -9,7 +9,7 @@ import PostDetailScreen from '../screens/PostDetailScreen';
 import QuestionDetailScreen from '../screens/QuestionDetailScreen';
 import AnswerDetailScreen from '../screens/AnswerDetailScreen';
 import AnswerComposeScreen from '../screens/AnswerComposeScreen';
-import EditProfileScreen from '../screens/EditProfileScreen';
+import QQBindScreen from '../screens/QQBindScreen';
 import CreateDraftScreen from '../screens/CreateDraftScreen';
 import EditPostScreen from '../screens/EditPostScreen';
 import CreateQuestionScreen from '../screens/CreateQuestionScreen';
@@ -24,14 +24,22 @@ import MyContentScreen from '../screens/MyContentScreen';
 import MyCollectsScreen from '../screens/MyCollectsScreen';
 import EditQuestionScreen from '../screens/EditQuestionScreen';
 import EditAnswerScreen from '../screens/EditAnswerScreen';
+import CommentRepliesScreen from '../screens/CommentRepliesScreen';
 import BootstrapScreen from '../screens/BootstrapScreen';
+import MapPickerScreen from '../screens/MapPickerScreen';
+import MapRouteScreen from '../screens/MapRouteScreen';
+import SettingsScreen from '../screens/SettingsScreen';
+import MessagesScreen from '../screens/MessagesScreen';
+import UserProfileScreen from '../screens/UserProfileScreen';
+import FollowListScreen from '../screens/FollowListScreen';
+import type { LngLat } from '../utils/mapHtml';
 
 export type RootStackParamList = {
   Bootstrap: undefined;
   Login: undefined;
   Register: undefined;
   MainTabs: undefined;
-  EditProfile: { user?: Record<string, unknown> };
+  QQBind: undefined;
   PostDetail: { id: number };
   QuestionDetail: { id: number };
   AnswerDetail: { id: number };
@@ -42,7 +50,9 @@ export type RootStackParamList = {
   EditAnswer: { id: number };
   CreateQuestion: undefined;
   GoodDetail: { id: number };
-  GoodCreate: { goodId?: number } | undefined;
+  GoodCreate:
+    | { goodId?: number; initialCategory?: 1 | 2; secondHandOnly?: boolean }
+    | undefined;
   MyContent: undefined;
   MyCollects: undefined;
   OrderDetail: { id: number };
@@ -53,7 +63,33 @@ export type RootStackParamList = {
     counterpartRole?: 'seller' | 'buyer';
   };
   AddressList: undefined;
+  CommentReplies: {
+    extType: number;
+    extId: number;
+    commentId: number;
+    commentAuthor?: string;
+    commentContent?: string;
+    commentLikeCount?: number;
+    commentIsLiked?: boolean;
+  };
   SchoolBind: undefined;
+  MapPicker: {
+    initCenter?: LngLat;
+    title?: string;
+    minPickZoom?: number;
+  } | undefined;
+  MapRoute: {
+    dest: LngLat;
+    origin?: LngLat;
+    destLabel?: string;
+    originLabel?: string;
+    profile?: string;
+    title?: string;
+  };
+  Settings: undefined;
+  Messages: undefined;
+  UserProfile: { userId: number };
+  FollowList: { userId: number; mode: 'followers' | 'following' };
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -110,8 +146,15 @@ export default function RootStack() {
       <Stack.Screen name="MyOrders" component={MyOrdersScreen} options={{ title: '我的订单' }} />
       <Stack.Screen name="OrderChat" component={OrderChatScreen} options={{ title: '订单沟通' }} />
       <Stack.Screen name="AddressList" component={AddressListScreen} options={{ title: '收货地址' }} />
+      <Stack.Screen name="CommentReplies" component={CommentRepliesScreen} options={{ title: '回复' }} />
       <Stack.Screen name="SchoolBind" component={SchoolBindScreen} options={{ title: '学籍认证' }} />
-      <Stack.Screen name="EditProfile" component={EditProfileScreen} options={{ title: '编辑资料' }} />
+      <Stack.Screen name="QQBind" component={QQBindScreen} options={{ title: 'QQ 认证' }} />
+      <Stack.Screen name="MapPicker" component={MapPickerScreen} options={{ title: '选择位置' }} />
+      <Stack.Screen name="MapRoute" component={MapRouteScreen} options={{ title: '路线' }} />
+      <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: '设置' }} />
+      <Stack.Screen name="Messages" component={MessagesScreen} options={{ headerShown: false }} />
+      <Stack.Screen name="UserProfile" component={UserProfileScreen} options={{ title: '主页' }} />
+      <Stack.Screen name="FollowList" component={FollowListScreen} options={{ title: '关注 / 粉丝' }} />
     </Stack.Navigator>
   );
 }

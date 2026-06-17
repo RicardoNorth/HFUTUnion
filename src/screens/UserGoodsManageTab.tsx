@@ -29,6 +29,8 @@ import {
   mergeById,
 } from '../utils/pagination';
 import type { RootStackParamList } from '../navigation/RootStack';
+import { formatGoodPrice } from '../utils/goodPrice';
+import { markListDirty } from '../utils/listInvalidate';
 
 const GOOD_ON = 1;
 const GOOD_OFF = 2;
@@ -53,10 +55,6 @@ function statusLabel(g: GoodRow) {
     return { text: '已售出', color: colors.accent };
   }
   return { text: '—', color: colors.textMuted };
-}
-
-function yuanFromCents(cents: number) {
-  return (cents / 100).toFixed(cents % 100 === 0 ? 0 : 2);
 }
 
 export default function UserGoodsManageTab({ stackNavigation }: Props) {
@@ -192,6 +190,10 @@ export default function UserGoodsManageTab({ stackNavigation }: Props) {
               } else {
                 await publishGood(g.id);
               }
+              // 商品上下架直接改 status，会让市集/求助 feed 内容变化——通知列表 dirty。
+              // 当前这里没法精确知道 cat=1 还是 2（GoodRow 字段稍后可补），保险起见两边都 mark。
+              markListDirty('goodMarket');
+              markListDirty('helpFeed');
               await loadInitial();
             } catch (e: any) {
               Alert.alert('操作失败', e?.message || '');
@@ -223,10 +225,23 @@ export default function UserGoodsManageTab({ stackNavigation }: Props) {
             <Text style={styles.cardTitle} numberOfLines={2}>
               {item.title}
             </Text>
-            <Text style={styles.price}>
-              ¥{yuanFromCents(item.price ?? 0)}
-              <Text style={styles.stock}> · 库存 {item.stock ?? 0}</Text>
-            </Text>
+            {(() => {
+              const t = formatGoodPrice(item.price, item.negotiable, item.goods_category);
+              if (!t) {
+                // 求物品 + 无价 + 非面议：仅展示库存
+                return (
+                  <Text style={styles.price}>
+                    <Text style={styles.stock}>库存 {item.stock ?? 0}</Text>
+                  </Text>
+                );
+              }
+              return (
+                <Text style={styles.price}>
+                  {t}
+                  <Text style={styles.stock}> · 库存 {item.stock ?? 0}</Text>
+                </Text>
+              );
+            })()}
             <View style={styles.stats}>
               <Text style={styles.statText}>浏览 {item.view_count ?? 0}</Text>
               <Text style={styles.statDot}>·</Text>

@@ -15,16 +15,22 @@ import OriginalImageViewer from '../components/OriginalImageViewer';
 import LoadingMask from '../components/LoadingMask';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { createOrder } from '../api/orders';
-import { getGood } from '../api/goods';
+import { getGood, requestOffShelfFromOrphan } from '../api/goods';
 import { likeAdd, likeRemove, collectAdd, collectRemove } from '../api/social';
 import Screen from '../components/Screen';
 import PrimaryButton from '../components/PrimaryButton';
 import SocialActionRow from '../components/SocialActionRow';
-import { colors, space } from '../theme/colors';
+import Ionicons from 'react-native-vector-icons/Ionicons';
+import { colors, radius, space } from '../theme/colors';
 import { cacheGet, cacheSet } from '../utils/cacheStorage';
 import { fetchUserInfo } from '../api/user';
 import { readCachedUserInfo } from '../utils/userCache';
 import { resolveCurrentUserId } from '../utils/userId';
+import { markViewed } from '../utils/viewedTracker';
+import { isDeadlineExpired, renderDeadlineBadge } from '../utils/deadline';
+import { formatAuthorName } from '../utils/authorName';
+import AuthorChip from '../components/AuthorChip';
+import { formatGoodPrice } from '../utils/goodPrice';
 
 const EXT_GOODS = 4;
 
@@ -77,6 +83,7 @@ export default function GoodDetailScreen({ route }: any) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [wantBusy, setWantBusy] = useState(false);
+  const [orphanReqBusy, setOrphanReqBusy] = useState(false);
   const [imgViewerVisible, setImgViewerVisible] = useState(false);
   const [imgViewerIndex, setImgViewerIndex] = useState(0);
   const [galleryIndex, setGalleryIndex] = useState(0);
@@ -130,6 +137,13 @@ export default function GoodDetailScreen({ route }: any) {
       load();
     }, [load]),
   );
+
+  // 进入详情即打标：列表外入口（聊天链接 / 推送等）也能正确变灰
+  useEffect(() => {
+    if (Number.isFinite(id) && id > 0) {
+      markViewed('good', id);
+    }
+  }, [id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -249,7 +263,7 @@ export default function GoodDetailScreen({ route }: any) {
       Number.isFinite(sid) &&
       sid === myUserId
     ) {
-      Alert.alert('提示', '不能购买自己发布的商品');
+      Alert.alert('提示', g.goods_category === 2 ? '不能接自己发布的求助' : '不能购买自己发布的商品');
       return;
     }
     try {
@@ -267,6 +281,43 @@ export default function GoodDetailScreen({ route }: any) {
     }
   };
 
+  /**
+   * 孤儿商品：bot 在 QQ 群 @ 发布者按 category 询问（cat=1 问"已出"/ cat=2 问"已求得"）。
+   * 同商品 1h 限 1 次。
+   */
+  const goRequestOffShelf = async () => {
+    if (!g) return;
+    const askCat2 = g.goods_category === 2;
+    const promptBody = askCat2
+      ? '帮你在群里 @ 发布者问"是否已经求得该物品"（请答是或不是）。同一项 1 小时内只能请求 1 次。'
+      : '帮你在群里 @ 卖家问"是否已经出了"（请答是或不是）。同一项 1 小时内只能请求 1 次。';
+    Alert.alert(
+      '请求下架',
+      promptBody,
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '请求下架',
+          onPress: async () => {
+            try {
+              setOrphanReqBusy(true);
+              await requestOffShelfFromOrphan(id);
+              Alert.alert('已发送', '已通知卖家，请在 QQ 留意回复。');
+            } catch (e: any) {
+              const msg = e?.message || '请求失败，请稍后再试';
+              const tail = g?.seller_qq_number
+                ? `\n\n备选：直接 QQ 联系 ${g.seller_qq_number}`
+                : '';
+              Alert.alert('请求失败', msg + tail);
+            } finally {
+              setOrphanReqBusy(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
   if (!g) {
     return (
       <Screen scroll={false}>
@@ -278,8 +329,13 @@ export default function GoodDetailScreen({ route }: any) {
     );
   }
 
+  const isHelp = g.goods_category === 2;
   const marked = g.marked_price as number | undefined;
-  const hasDisc = marked != null && marked > g.price;
+  const hasDisc =
+    !isHelp &&
+    !g.negotiable &&
+    marked != null &&
+    marked > g.price;
   const pct = hasDisc ? discountPercent(marked, g.price) : 0;
 
   const galleryUrls = ((g.images as string[] | undefined)?.filter(Boolean) ?? []) as string[];
@@ -352,27 +408,92 @@ export default function GoodDetailScreen({ route }: any) {
         )}
 
         <View style={styles.priceBlock}>
-          <View style={styles.priceMainRow}>
-            <Text style={styles.price}>{formatPrice(g.price)}</Text>
-            {hasDisc ? (
-              <>
-                <Text style={styles.old}>{formatPrice(marked)}</Text>
-                <View style={styles.discTag}>
-                  <Text style={styles.discTagText}>省{pct}%</Text>
-                </View>
-              </>
-            ) : null}
-          </View>
+          {(() => {
+            const priceText = formatGoodPrice(g.price, g.negotiable, g.goods_category);
+            if (!priceText) {
+              return null; // 求物品 + 无价 + 非面议：整行价格隐藏
+            }
+            return (
+              <View style={styles.priceMainRow}>
+                <Text style={styles.price}>{priceText}</Text>
+                {hasDisc ? (
+                  <>
+                    <Text style={styles.old}>{formatPrice(marked)}</Text>
+                    <View style={styles.discTag}>
+                      <Text style={styles.discTagText}>省{pct}%</Text>
+                    </View>
+                  </>
+                ) : null}
+              </View>
+            );
+          })()}
           <Text style={styles.title}>{g.title}</Text>
           <View style={styles.chips}>
-            <View style={styles.chip}>
-              <Text style={styles.chipText}>{g.goods_type_label || '商品'}</Text>
-            </View>
-            <Text style={styles.meta}>库存 {g.stock}</Text>
+            {isHelp ? (
+              <>
+                <View style={[styles.chip, styles.chipHelp]}>
+                  <Text style={[styles.chipText, styles.chipHelpText]}>求物品</Text>
+                </View>
+                {!g.negotiable && (g.price ?? 0) > 0 ? (
+                  <View style={[styles.chip, styles.chipHelp]}>
+                    <Text style={[styles.chipText, styles.chipHelpText]}>有偿</Text>
+                  </View>
+                ) : null}
+              </>
+            ) : (
+              <View style={styles.chip}>
+                <Text style={styles.chipText}>{g.goods_type_label || '商品'}</Text>
+              </View>
+            )}
+            {g.is_batch ? (
+              <View style={[styles.chip, styles.chipBatch]}>
+                <Text style={[styles.chipText, styles.chipBatchText]}>批量上架</Text>
+              </View>
+            ) : null}
+            {renderDeadlineBadge(g) ? (
+              <View
+                style={[
+                  styles.chip,
+                  isDeadlineExpired(g) ? styles.chipExpired : styles.chipDeadline,
+                ]}>
+                <Text
+                  style={[
+                    styles.chipText,
+                    isDeadlineExpired(g) ? styles.chipExpiredText : styles.chipDeadlineText,
+                  ]}>
+                  {renderDeadlineBadge(g)}
+                </Text>
+              </View>
+            ) : null}
+            {!isHelp && g.bargain ? (
+              <View style={[styles.chip, styles.chipBargain]}>
+                <Text style={[styles.chipText, styles.chipBargainText]}>可刀</Text>
+              </View>
+            ) : null}
+            {!isHelp ? <Text style={styles.meta}>库存 {g.stock}</Text> : null}
           </View>
-          <Text style={styles.addr}>
-            {g.goods_addr || g.pickup_addr || '见详情'}
-          </Text>
+          {!isHelp ? (
+            <View style={styles.addrRow}>
+              <Text style={styles.addr}>
+                {g.goods_addr || g.pickup_addr || '见详情'}
+              </Text>
+              {g.goods_lat != null && g.goods_lng != null ? (
+                <TouchableOpacity
+                  style={styles.routeBtn}
+                  onPress={() =>
+                    navigation.navigate('MapRoute', {
+                      dest: { lng: Number(g.goods_lng), lat: Number(g.goods_lat) },
+                      destLabel: g.goods_addr || g.pickup_addr || '商品位置',
+                      title: '到商品的路线',
+                    })
+                  }
+                  activeOpacity={0.85}>
+                  <Ionicons name="navigate-outline" size={14} color={colors.primary} />
+                  <Text style={styles.routeBtnText}>路线</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null}
           {g.view_count != null || g.like_count != null || g.collect_count != null ? (
             <Text style={styles.statsLine}>
               {[
@@ -400,15 +521,39 @@ export default function GoodDetailScreen({ route }: any) {
 
         <Text style={styles.body}>{g.content}</Text>
         <View style={styles.seller}>
-          <Text style={styles.sellerLabel}>卖家</Text>
-          <Text style={styles.sellerName}>{g.author?.username || '匿名'}</Text>
+          <Text style={styles.sellerLabel}>{isHelp ? '发布者' : '卖家'}</Text>
+          <AuthorChip author={g.author as any} size="md" fallback="匿名" />
         </View>
         {isOwnGood ? (
           <Text style={styles.ownGoodHint}>
-            这是您发布的商品，无法向自己购买；买家可在「我想要」与您沟通。
+            {isHelp ? '这是你发布的求助' : '这是你发布的商品'}
           </Text>
+        ) : g.is_orphan_owner ? (
+          // 孤儿商品：发布人不在 app 里，无法下单聊天；引导走 QQ 私聊 + 提供"请求下架"
+          <View style={styles.orphanBlock}>
+            <View style={styles.orphanBanner}>
+              <Ionicons name="information-circle-outline" size={18} color={colors.primary} />
+              <Text style={styles.orphanBannerText}>
+                {isHelp
+                  ? `发布人通过 QQ ${g.seller_qq_number || ''} 联系；请直接 QQ 沟通`
+                  : `卖家通过 QQ ${g.seller_qq_number || ''} 联系；请直接 QQ 沟通`}
+              </Text>
+            </View>
+            <PrimaryButton
+              title="请求下架"
+              onPress={goRequestOffShelf}
+              loading={orphanReqBusy}
+              variant="outline"
+              style={styles.buy}
+            />
+          </View>
         ) : (
-          <PrimaryButton title="我想要" onPress={goWant} loading={wantBusy} style={styles.buy} />
+          <PrimaryButton
+            title={isHelp ? '我来接' : '我想要'}
+            onPress={goWant}
+            loading={wantBusy}
+            style={styles.buy}
+          />
         )}
       </ScrollView>
 
@@ -461,8 +606,34 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   chipText: { fontSize: 13, fontWeight: '600', color: colors.primary },
+  chipHelp: { backgroundColor: '#FFEDD5' },
+  chipHelpText: { color: '#C2410C' },
+  chipDeadline: { backgroundColor: '#FEF3C7' },
+  chipDeadlineText: { color: '#92400E' },
+  chipExpired: { backgroundColor: '#F3F4F6' },
+  chipExpiredText: { color: colors.textMuted },
+  chipBargain: { backgroundColor: '#FEF3C7' },
+  chipBargainText: { color: '#B45309' },
+  chipBatch: { backgroundColor: '#EDE9FE' },
+  chipBatchText: { color: '#5B21B6' },
   meta: { fontSize: 13, color: colors.textSecondary },
-  addr: { fontSize: 14, color: colors.textSecondary, marginTop: 8, lineHeight: 20 },
+  addr: { fontSize: 14, color: colors.textSecondary, marginTop: 8, lineHeight: 20, flex: 1 },
+  addrRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  routeBtn: {
+    marginTop: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    backgroundColor: colors.primaryLight,
+    borderRadius: radius.xl,
+  },
+  routeBtnText: { color: colors.primary, fontSize: 12, fontWeight: '700' },
   statsLine: {
     marginTop: 10,
     fontSize: 12,
@@ -483,6 +654,21 @@ const styles = StyleSheet.create({
   sellerLabel: { fontSize: 13, color: colors.textMuted },
   sellerName: { fontSize: 15, fontWeight: '600', color: colors.primary },
   buy: { marginHorizontal: space.md, marginTop: 24 },
+  orphanBlock: { marginTop: 4 },
+  orphanBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginHorizontal: space.md,
+    marginTop: 16,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: colors.primaryLight,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  orphanBannerText: { flex: 1, color: colors.text, fontSize: 13, lineHeight: 18 },
   ownGoodHint: {
     marginHorizontal: space.md,
     marginTop: 24,

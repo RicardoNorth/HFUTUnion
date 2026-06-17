@@ -19,14 +19,33 @@ import { readCachedUserInfo, writeCachedUserInfo, clearCachedUserInfo } from '..
 import { API_BASE } from '../config';
 import Screen from '../components/Screen';
 import { colors, radius, space } from '../theme/colors';
+import { useMessagesUnread } from '../context/MessagesUnreadContext';
+import { useNotifSettings } from '../utils/notifSettings';
+import { getNativeVersionName } from '../native/appInfo';
 
 const defaultAvatar = require('../assets/default-avatar.png');
-const defaultBg = require('../assets/default-bg.jpg');
+
+/**
+ * appendCacheBust 在 URL 上正确拼一个 `t=<ts>` cache-busting 参数。
+ *
+ * 直接 `${url}?t=...` 在 url 已经带 query 的场景下会拼出两个 `?`——比如七牛缩略图
+ * URL 自带 `?imageView2/2/w/720/q/75`，再加 `?t=123` 就变成
+ * `...avatar.jpg?imageView2/.../q/75?t=123`，七牛解析失败 404。
+ *
+ * 为什么需要 cache-busting：用户在本机上传新头像/背景后，后端写到同一个 storage key
+ * （path 不变），RN Image 缓存里仍然是旧图——加个时间戳让 Image 重新拉一份。
+ */
+function appendCacheBust(url: string): string {
+  if (!url) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}t=${Date.now()}`;
+}
 
 const menuAll = [
-  { key: 'edit', label: '编辑资料', icon: 'person-outline', nav: 'EditProfile' as const },
+  { key: 'qq', label: 'QQ 认证', icon: 'link-outline', nav: 'QQBind' as const },
   { key: 'school', label: '学籍认证', icon: 'school-outline', nav: 'SchoolBind' as const },
   { key: 'addr', label: '收货地址', icon: 'location-outline', nav: 'AddressList' as const },
+  { key: 'settings', label: '设置', icon: 'settings-outline', nav: 'Settings' as const },
 ] as const;
 
 export default function ProfileScreen() {
@@ -36,6 +55,8 @@ export default function ProfileScreen() {
   const [uploading, setUploading] = useState(false);
   const [previewVisible, setPreviewVisible] = useState(false);
   const [previewType, setPreviewType] = useState<'avatar' | 'background'>('avatar');
+  const { total: msgUnread } = useMessagesUnread();
+  const { showBadgeCount } = useNotifSettings();
 
   const loadUserInfo = useCallback(async () => {
     let cached: UserInfo | null = null;
@@ -151,11 +172,12 @@ export default function ProfileScreen() {
   }
 
   const avatarSource = user.avatar
-    ? { uri: `${user.avatar}?t=${Date.now()}` }
+    ? { uri: appendCacheBust(user.avatar) }
     : defaultAvatar;
+  // 默认背景：纯白，不再用任何图。用户上传过自己的背景才走 Image。
   const bgSource = user.background
-    ? { uri: `${user.background}?t=${Date.now()}` }
-    : defaultBg;
+    ? { uri: appendCacheBust(user.background) }
+    : null;
 
   const schoolVerified = Number(user.school_id) > 0;
   const menu = menuAll.filter((m) => m.key !== 'school' || !schoolVerified);
@@ -167,14 +189,48 @@ export default function ProfileScreen() {
         contentContainerStyle={styles.container}
         showsVerticalScrollIndicator={false}>
         <TouchableOpacity onPress={() => { setPreviewType('background'); setPreviewVisible(true); }}>
-          <Image source={bgSource} style={styles.bg} />
+          {bgSource ? (
+            <Image source={bgSource} style={styles.bg} />
+          ) : (
+            <View style={[styles.bg, styles.bgDefault]} />
+          )}
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.avatarWrap}
           onPress={() => { setPreviewType('avatar'); setPreviewVisible(true); }}>
           <Image source={avatarSource} style={styles.avatar} />
         </TouchableOpacity>
-        <Text style={styles.username}>{user.username}</Text>
+        <Text style={styles.username}>{user.nickname || user.username}</Text>
+        {user.bio ? (
+          <Text style={styles.bio} numberOfLines={2}>{user.bio}</Text>
+        ) : null}
+
+        {/* 关注 / 粉丝量入口——点击跳到 FollowList 屏幕；UserProfileScreen 入口让自己也能预览公开页 */}
+        <View style={styles.statsRow}>
+          <TouchableOpacity
+            style={styles.statItem}
+            activeOpacity={0.7}
+            onPress={() => user.id && navigation.navigate('FollowList', { userId: user.id, mode: 'following' })}>
+            <Text style={styles.statValue}>{Number(user.follow_count) || 0}</Text>
+            <Text style={styles.statLabel}>关注</Text>
+          </TouchableOpacity>
+          <View style={styles.statDivider} />
+          <TouchableOpacity
+            style={styles.statItem}
+            activeOpacity={0.7}
+            onPress={() => user.id && navigation.navigate('FollowList', { userId: user.id, mode: 'followers' })}>
+            <Text style={styles.statValue}>{Number(user.fans_count) || 0}</Text>
+            <Text style={styles.statLabel}>粉丝</Text>
+          </TouchableOpacity>
+          <View style={styles.statDivider} />
+          <TouchableOpacity
+            style={styles.statItem}
+            activeOpacity={0.7}
+            onPress={() => user.id && navigation.navigate('UserProfile', { userId: user.id })}>
+            <Ionicons name="eye-outline" size={18} color={colors.primary} />
+            <Text style={styles.statLabel}>主页预览</Text>
+          </TouchableOpacity>
+        </View>
         {schoolVerified ? (
           <View style={styles.schoolBlock}>
             <Text style={styles.school}>{user.school_name || '已绑定学校'}</Text>
@@ -191,6 +247,29 @@ export default function ProfileScreen() {
 
         <TouchableOpacity
           style={styles.orderEntry}
+          activeOpacity={0.85}
+          onPress={() => navigation.navigate('Messages')}>
+          <View style={styles.orderEntryRow}>
+            <View style={styles.orderIconWrap}>
+              <Ionicons name="chatbubble-ellipses-outline" size={24} color={colors.primary} />
+            </View>
+            <View style={styles.orderEntryText}>
+              <Text style={styles.orderEntryTitle}>消息</Text>
+              <Text style={styles.orderEntrySub}>互动 · 订单沟通</Text>
+            </View>
+            {msgUnread > 0 ? (
+              <View style={styles.msgBadge}>
+                <Text style={styles.msgBadgeText}>
+                  {showBadgeCount ? (msgUnread > 99 ? '99+' : msgUnread) : ' '}
+                </Text>
+              </View>
+            ) : null}
+            <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+          </View>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.orderEntry, styles.orderEntryFollow]}
           activeOpacity={0.85}
           onPress={() => navigation.navigate('MyOrders')}>
           <View style={styles.orderEntryRow}>
@@ -257,10 +336,16 @@ export default function ProfileScreen() {
             <Text style={[styles.menuLabel, { color: colors.danger }]}>退出登录</Text>
           </TouchableOpacity>
         </View>
+
+        <Text style={styles.versionText}>当前版本 v{getNativeVersionName()}</Text>
       </ScrollView>
 
       <ImageViewing
-        images={[previewType === 'avatar' ? avatarSource : bgSource]}
+        images={[
+          previewType === 'avatar'
+            ? avatarSource
+            : bgSource ?? defaultAvatar /* 兜底，不会真展示——背景为空时按钮不可见，到不了这里 */,
+        ]}
         imageIndex={0}
         visible={previewVisible}
         onRequestClose={() => setPreviewVisible(false)}
@@ -283,6 +368,7 @@ const styles = StyleSheet.create({
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   muted: { color: colors.textMuted },
   bg: { width: '100%', height: 140, borderRadius: 0 },
+  bgDefault: { backgroundColor: '#FFFFFF' },
   avatarWrap: { marginTop: -48, alignSelf: 'center' },
   avatar: {
     width: 96,
@@ -298,6 +384,25 @@ const styles = StyleSheet.create({
     color: colors.text,
     marginTop: 12,
   },
+  bio: {
+    textAlign: 'center',
+    fontSize: 13,
+    color: colors.textSecondary,
+    paddingHorizontal: space.lg,
+    marginTop: 6,
+  },
+  statsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'center',
+    marginTop: space.md,
+    paddingVertical: space.xs,
+    paddingHorizontal: space.md,
+  },
+  statItem: { alignItems: 'center', paddingHorizontal: space.md, minWidth: 78 },
+  statValue: { fontSize: 18, fontWeight: '700', color: colors.text },
+  statLabel: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  statDivider: { width: 1, height: 22, backgroundColor: colors.border },
   schoolBlock: {
     marginTop: 8,
     alignItems: 'center',
@@ -366,6 +471,23 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   menuLabel: { flex: 1, fontSize: 16, color: colors.text },
+  msgBadge: {
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 5,
+    borderRadius: 9,
+    backgroundColor: '#FF3B30',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 6,
+  },
+  msgBadgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
   header: { position: 'absolute', top: 50, right: 20, zIndex: 10 },
   changeText: { color: '#fff', fontSize: 16 },
+  versionText: {
+    marginTop: space.lg,
+    fontSize: 12,
+    color: colors.textMuted,
+    textAlign: 'center',
+  },
 });

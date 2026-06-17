@@ -24,10 +24,23 @@ export type OrderRow = {
     price: number;
     goods_type?: number;
     goods_type_label?: string;
+    /** 1=二手买卖 2=有偿求助 */
+    goods_category?: number;
+    goods_category_label?: string;
+    /** 卖家收款码完整 URL（可能为空） */
+    payment_qr_url?: string;
     goods_lat?: number | null;
     goods_lng?: number | null;
     /** 卖方用户 id */
     user_id?: number | null;
+    /** 后端目前未返回，保留为兜底 */
+    author?: {
+      id: number;
+      username?: string;
+      avatar?: string;
+      from_user_id?: number;
+      from_username?: string;
+    };
   };
   created_at?: string;
 };
@@ -93,9 +106,25 @@ export async function orderMessages(orderId: number, page = 1, pageSize = 50) {
       msg_type?: number;
       created_at?: string;
       sender_id?: number;
+      /** P3.3 加急：当前消息已被加急（红色徽章 + 提示对方 QQ 已收到加急通知） */
+      urgent?: boolean;
+      /** P3.3 加急时间戳（ISO 串）；用作徽章 hover tooltip */
+      urged_at?: string | null;
     }>;
     total: number;
   }>(`/orders/${orderId}/messages${buildQuery({ page, pageSize })}`);
+}
+
+/** P3.3 加急：把订单中某条消息推到对方 QQ。
+ *
+ * 后端返回 429 时 data.retry_after_seconds = 剩余秒数；前端用做按钮倒计时。
+ * 成功后页面应重新拉一次 orderMessages 让 urgent 字段刷新。
+ */
+export async function urgeOrderMessage(orderId: number, msgId: number) {
+  return apiRequest<unknown>(`/orders/${orderId}/messages/${msgId}/urge`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
 }
 
 export async function postOrderMessage(
@@ -115,7 +144,10 @@ export async function sellerConfirmPayment(orderId: number) {
   });
 }
 
-export async function confirmDelivery(orderId: number, body: Record<string, unknown> = {}) {
+export async function confirmDelivery(
+  orderId: number,
+  body: { delivery_images: string[] },
+) {
   return apiRequest<unknown>(`/orders/${orderId}/confirm-delivery`, {
     method: 'POST',
     body: JSON.stringify(body),
@@ -124,6 +156,17 @@ export async function confirmDelivery(orderId: number, body: Record<string, unkn
 
 export async function confirmReceipt(orderId: number, body: Record<string, unknown> = {}) {
   return apiRequest<unknown>(`/orders/${orderId}/confirm-receipt`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+/** 有偿求助：发布者上传付酬截图，订单 1→3（待接单者确认收到酬劳） */
+export async function helpPublisherPay(
+  orderId: number,
+  body: { payment_image: string; note?: string },
+) {
+  return apiRequest<unknown>(`/orders/${orderId}/help/pay`, {
     method: 'POST',
     body: JSON.stringify(body),
   });

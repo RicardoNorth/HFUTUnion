@@ -21,6 +21,7 @@ import { fetchUserLocations, type UserLocation } from '../api/user';
 import Screen from '../components/Screen';
 import { colors, radius, space } from '../theme/colors';
 import { haversineMeters, formatDistance } from '../utils/geo';
+import { formatGoodPrice } from '../utils/goodPrice';
 import {
   resolveMarketplaceRef,
   saveMarketplaceRefPref,
@@ -38,6 +39,9 @@ import {
   mergeById,
   hasMorePages,
 } from '../utils/pagination';
+import { markViewed, useViewedSet } from '../utils/viewedTracker';
+import { isDeadlineExpired, renderDeadlineBadge } from '../utils/deadline';
+import { consumeListDirty } from '../utils/listInvalidate';
 
 function goodsCacheKey(keyword: string, sort: GoodsListSort) {
   const k = keyword.trim() || '__all__';
@@ -74,7 +78,12 @@ export default function GoodListScreen() {
   const [gpsPicking, setGpsPicking] = useState(false);
   const [keyword, setKeyword] = useState('');
   const keywordRef = useRef('');
-  const [goodsSort, setGoodsSort] = useState<GoodsListSort>('newest');
+  // 默认进入即个性化推荐；顶部排序 chip 可切到「最新 / 最近更新」
+  const [goodsSort, setGoodsSort] = useState<GoodsListSort>('recommend');
+  /** 推荐模式下后端返回的 refresh_token，翻页复用保持顺序稳定；下拉刷新清空以触发新一条推荐流 */
+  const goodsTokenRef = useRef<string | undefined>(undefined);
+  /** 已点击过的商品 ID 集合：点击打标，列表再次渲染变灰字 */
+  const viewedGoods = useViewedSet('good');
 
   const applyLocationsAndRef = useCallback(async (locs: UserLocation[]) => {
     setLocations(locs);
@@ -89,39 +98,51 @@ export default function GoodListScreen() {
 
   const load = useCallback(async () => {
     const qTrim = keywordRef.current.trim();
+    // 推荐模式：每次刷新都应给出新的个性化流，不读也不写本地缓存；其它排序走缓存预热
+    const isRecommend = goodsSort === 'recommend' && !qTrim;
     const cacheKey = goodsCacheKey(qTrim, goodsSort);
     let hadCache = false;
-    try {
-      const cached = await cacheGet<{ list: GoodRow[] }>(cacheKey);
-      if (cached?.list?.length) {
-        hadCache = true;
-        setList(cached.list);
-        setListLoading(false);
+    if (!isRecommend) {
+      try {
+        const cached = await cacheGet<{ list: GoodRow[] }>(cacheKey);
+        if (cached?.list?.length) {
+          hadCache = true;
+          setList(cached.list);
+          setListLoading(false);
+        }
+      } catch {
+        /* noop */
       }
-    } catch {
-      /* noop */
     }
     if (!hadCache) {
       setListLoading(true);
     }
     pageRef.current = 1;
     loadingMoreRef.current = false;
+    // 新一轮加载：清空推荐 token，让后端返回新 token 开启新个性化流
+    goodsTokenRef.current = undefined;
     try {
       const q = qTrim;
       const [res, locs] = await Promise.all([
         listGoods(1, PAGE_SIZE, {
           q: q || undefined,
           sort: goodsSort,
+          category: 1, // 市集仅展示二手买卖；有偿求助已迁到「求助」tab
         }),
         fetchUserLocations().catch(() => [] as UserLocation[]),
       ]);
       const rows = res.list || [];
       const total = res.total;
+      if (res.refresh_token) {
+        goodsTokenRef.current = res.refresh_token;
+      }
       setList(rows);
       const more = hasMorePages(rows.length, PAGE_SIZE, total, rows.length);
       setHasMore(more);
       hasMoreRef.current = more;
-      await cacheSet(cacheKey, { list: rows });
+      if (!isRecommend) {
+        await cacheSet(cacheKey, { list: rows });
+      }
       await applyLocationsAndRef(locs);
     } catch {
       if (!hadCache) {
@@ -147,7 +168,12 @@ export default function GoodListScreen() {
       const res = await listGoods(nextPage, PAGE_SIZE, {
         q: qTrim || undefined,
         sort: goodsSort,
+        category: 1,
+        refreshToken: goodsSort === 'recommend' ? goodsTokenRef.current : undefined,
       });
+      if (res.refresh_token) {
+        goodsTokenRef.current = res.refresh_token;
+      }
       const rows = res.list || [];
       const total = res.total;
       setList((prev) => {
@@ -168,9 +194,19 @@ export default function GoodListScreen() {
     }
   }, [goodsSort]);
 
+  // 首次 mount + 排序/搜索导致 load 引用变化 → 立刻 load。
+  // load 函数依赖 goodsSort：用户切排序 chip 会让 load 重建，触发本 effect。
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // focus 仅在外部显式置位 dirty 时才重拉，避免"点详情→返回→列表顺序抖"。
+  // 触发 dirty 的场景目前为：GoodCreateScreen 发布成功（cat=1 二手）。
   useFocusEffect(
     useCallback(() => {
-      load();
+      if (consumeListDirty('goodMarket')) {
+        load();
+      }
     }, [load]),
   );
 
@@ -231,6 +267,14 @@ export default function GoodListScreen() {
         <View style={styles.sortRow}>
           <View style={styles.sortLeft}>
             <Text style={styles.sortLabel}>排序</Text>
+            <TouchableOpacity
+              style={[styles.sortChip, goodsSort === 'recommend' && styles.sortChipOn]}
+              onPress={() => setGoodsSort('recommend')}
+              activeOpacity={0.85}>
+              <Text style={[styles.sortChipText, goodsSort === 'recommend' && styles.sortChipTextOn]}>
+                推荐
+              </Text>
+            </TouchableOpacity>
             <TouchableOpacity
               style={[styles.sortChip, goodsSort === 'newest' && styles.sortChipOn]}
               onPress={() => setGoodsSort('newest')}
@@ -303,26 +347,58 @@ export default function GoodListScreen() {
                   )
                 : null;
             const marked = item.marked_price;
-            const hasDisc = marked != null && marked > item.price;
+            const hasDisc =
+              !item.negotiable &&
+              marked != null &&
+              marked > item.price;
             const pct = hasDisc ? discountPercent(marked, item.price) : 0;
             const hasCover = Boolean(item.images?.[0]);
+            // 本地 viewedTracker ∪ 后端 is_viewed（跨设备），任一命中即灰字
+            const viewed = viewedGoods.has(item.id) || !!item.is_viewed;
+            const deadlineText = renderDeadlineBadge(item);
+            const expired = isDeadlineExpired(item);
 
             return (
               <TouchableOpacity
                 style={[styles.card, !hasCover && styles.cardCompact]}
                 activeOpacity={0.85}
-                onPress={() => navigation.navigate('GoodDetail', { id: item.id })}>
+                onPress={() => {
+                  markViewed('good', item.id);
+                  navigation.navigate('GoodDetail', { id: item.id });
+                }}>
                 {hasCover && item.images?.[0] ? (
                   <>
                     <Image source={{ uri: item.images[0] }} style={styles.cover} />
-                    {item.goods_type_label ? (
-                      <View style={styles.typeTag}>
-                        <Text style={styles.typeTagText} numberOfLines={1}>
-                          {item.goods_type_label}
-                        </Text>
-                      </View>
-                    ) : null}
-                    <Text numberOfLines={2} style={styles.title}>
+                    <View style={styles.tagStack}>
+                      {item.is_batch ? (
+                        <View style={[styles.typeTag, styles.typeTagBatch]}>
+                          <Text style={styles.typeTagText} numberOfLines={1}>
+                            批量上架
+                          </Text>
+                        </View>
+                      ) : null}
+                      {item.goods_type_label ? (
+                        <View style={styles.typeTag}>
+                          <Text style={styles.typeTagText} numberOfLines={1}>
+                            {item.goods_type_label}
+                          </Text>
+                        </View>
+                      ) : null}
+                      {deadlineText ? (
+                        <View
+                          style={[
+                            styles.typeTag,
+                            expired ? styles.typeTagExpired : styles.typeTagDeadline,
+                          ]}>
+                          <Text style={styles.typeTagText} numberOfLines={1}>
+                            {deadlineText}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
+                    <Text
+                      numberOfLines={2}
+                      style={[styles.title, viewed && styles.viewedText]}>
                       {item.title}
                     </Text>
                   </>
@@ -332,21 +408,50 @@ export default function GoodListScreen() {
                       <Text style={styles.noCoverBadgeText}>无图</Text>
                     </View>
                     <View style={styles.noCoverHeadMain}>
-                      {item.goods_type_label ? (
-                        <View style={styles.typeTagInline}>
-                          <Text style={styles.typeTagInlineText} numberOfLines={1}>
-                            {item.goods_type_label}
-                          </Text>
-                        </View>
-                      ) : null}
-                      <Text numberOfLines={2} style={styles.titleNoCover}>
+                      <View style={styles.inlineTagRow}>
+                        {item.is_batch ? (
+                          <View style={[styles.typeTagInline, styles.typeTagInlineBatch]}>
+                            <Text style={styles.typeTagInlineText} numberOfLines={1}>
+                              批量上架
+                            </Text>
+                          </View>
+                        ) : null}
+                        {item.goods_type_label ? (
+                          <View style={styles.typeTagInline}>
+                            <Text style={styles.typeTagInlineText} numberOfLines={1}>
+                              {item.goods_type_label}
+                            </Text>
+                          </View>
+                        ) : null}
+                        {deadlineText ? (
+                          <View
+                            style={[
+                              styles.typeTagInline,
+                              expired ? styles.typeTagInlineExpired : styles.typeTagInlineDeadline,
+                            ]}>
+                            <Text style={styles.typeTagInlineText} numberOfLines={1}>
+                              {deadlineText}
+                            </Text>
+                          </View>
+                        ) : null}
+                      </View>
+                      <Text
+                        numberOfLines={2}
+                        style={[styles.titleNoCover, viewed && styles.viewedText]}>
                         {item.title}
                       </Text>
                     </View>
                   </View>
                 )}
                 <View style={[styles.priceRow, !hasCover && styles.priceRowCompact]}>
-                  <Text style={styles.price}>{formatPrice(item.price)}</Text>
+                  <Text style={[styles.price, viewed && styles.viewedPrice]}>
+                    {formatGoodPrice(item.price, item.negotiable, item.goods_category)}
+                  </Text>
+                  {item.bargain ? (
+                    <View style={styles.bargainTag}>
+                      <Text style={styles.bargainTagText}>可刀</Text>
+                    </View>
+                  ) : null}
                   {hasDisc ? (
                     <>
                       <Text style={styles.oldPrice}>{formatPrice(marked)}</Text>
@@ -357,20 +462,29 @@ export default function GoodListScreen() {
                   ) : null}
                 </View>
                 <Text
-                  style={[styles.metaLine, !hasCover && styles.metaLineCompact]}
+                  style={[
+                    styles.metaLine,
+                    !hasCover && styles.metaLineCompact,
+                    viewed && styles.viewedMeta,
+                  ]}
                   numberOfLines={1}>
                   {dist != null
                     ? `距参考点 ${formatDistance(dist)}`
                     : refPoint == null
-                      ? '右上角选择参考位置后可显示距离'
-                      : '商品无坐标时无法算距'}
+                      ? '选定参考点后显示距离'
+                      : '位置待定'}
                 </Text>
               </TouchableOpacity>
             );
           }}
         />
 
-        <CreateFab onPress={() => navigation.navigate('GoodCreate')} accessibilityLabel="发布闲置" />
+        <CreateFab
+          onPress={() =>
+            navigation.navigate('GoodCreate', { secondHandOnly: true })
+          }
+          accessibilityLabel="发布闲置"
+        />
       </View>
 
       <Modal visible={pickerOpen} animationType="fade" transparent>
@@ -379,7 +493,7 @@ export default function GoodListScreen() {
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>市集距离参考</Text>
             <Text style={styles.modalHint}>
-              用来算商品与你的距离。可从地址簿选一条，或用当前定位。
+              选一个参考点，用来算商品距离
             </Text>
 
             <TouchableOpacity
@@ -402,7 +516,7 @@ export default function GoodListScreen() {
               keyExtractor={(i) => String(i.id)}
               keyboardShouldPersistTaps="handled"
               ListEmptyComponent={
-                <Text style={styles.modalEmpty}>还没有保存的地址，可在下方管理地址后添加</Text>
+                <Text style={styles.modalEmpty}>还没有保存的地址，去下方添加</Text>
               }
               renderItem={({ item }) => (
                 <TouchableOpacity
@@ -559,17 +673,32 @@ const styles = StyleSheet.create({
     maxWidth: '100%',
   },
   typeTagInlineText: { fontSize: 10, color: colors.textSecondary, fontWeight: '600' },
-  typeTag: {
+  tagStack: {
     position: 'absolute',
     top: 8,
     left: 8,
-    maxWidth: '70%',
+    right: 8,
+    flexDirection: 'row',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  typeTag: {
+    maxWidth: '100%',
     backgroundColor: 'rgba(0,0,0,0.55)',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 6,
   },
   typeTagText: { fontSize: 11, color: '#fff', fontWeight: '600' },
+  typeTagHelp: { backgroundColor: '#F97316' },
+  typeTagDeadline: { backgroundColor: '#F59E0B' },
+  typeTagExpired: { backgroundColor: '#6B7280' },
+  typeTagBatch: { backgroundColor: '#7C3AED' }, // 紫色：合并聊天记录批量上架
+  inlineTagRow: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
+  typeTagInlineHelp: { backgroundColor: '#FFEDD5' },
+  typeTagInlineDeadline: { backgroundColor: '#FEF3C7' },
+  typeTagInlineExpired: { backgroundColor: '#F3F4F6' },
+  typeTagInlineBatch: { backgroundColor: '#EDE9FE' }, // 浅紫：批量上架（无图模式）
   title: { fontSize: 14, paddingHorizontal: 8, paddingTop: 8, color: colors.text, fontWeight: '500' },
   priceRow: {
     flexDirection: 'row',
@@ -592,6 +721,13 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   discBadgeText: { fontSize: 10, fontWeight: '800', color: '#DC2626' },
+  bargainTag: {
+    backgroundColor: '#FEF3C7',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  bargainTagText: { fontSize: 10, fontWeight: '800', color: '#B45309' },
   priceRowCompact: { paddingTop: 4 },
   metaLine: {
     fontSize: 11,
@@ -601,6 +737,10 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
   },
   metaLineCompact: { paddingTop: 2, paddingBottom: 6, fontSize: 10 },
+  /** 已看过：标题、价格、距离行全部降灰，让用户一眼看出「这件我点过」 */
+  viewedText: { color: colors.textMuted, fontWeight: '400' },
+  viewedPrice: { color: colors.textMuted, fontWeight: '700' },
+  viewedMeta: { color: colors.textMuted },
   empty: { textAlign: 'center', color: colors.textMuted, marginTop: 40, paddingHorizontal: space.lg },
   modalOverlay: {
     flex: 1,

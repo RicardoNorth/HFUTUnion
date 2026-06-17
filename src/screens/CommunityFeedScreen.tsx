@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -8,19 +8,14 @@ import {
   StyleSheet,
   RefreshControl,
   ActivityIndicator,
-  Modal,
-  Pressable,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   listPosts,
   listAnswers,
-  listQuestions,
   type ArticleRow,
   type AnswerRow,
-  type PostFeedMode,
 } from '../api/article';
 import ArticleListTags from '../components/ArticleListTags';
 import CreateFab from '../components/CreateFab';
@@ -29,90 +24,31 @@ import LoadingMask from '../components/LoadingMask';
 import { colors, radius, space } from '../theme/colors';
 import { cacheGet, cacheSet } from '../utils/cacheStorage';
 import { useCommunityFeedMode } from '../context/CommunityFeedContext';
-import {
-  PAGE_SIZE,
-  mergeById,
-  hasMorePages,
-} from '../utils/pagination';
+import { PAGE_SIZE, mergeById, hasMorePages } from '../utils/pagination';
+import { markViewed, useViewedSet } from '../utils/viewedTracker';
+import { formatAuthorName } from '../utils/authorName';
+import AuthorChip from '../components/AuthorChip';
 
 type FeedRow =
   | { k: 'post'; item: ArticleRow }
-  | { k: 'answer'; item: AnswerRow }
-  | { k: 'question'; item: ArticleRow };
+  | { k: 'answer'; item: AnswerRow };
 
-function rowTime(row: ArticleRow): number {
-  const s = row.updated_at || row.created_at || '';
-  const t = Date.parse(s);
-  return Number.isFinite(t) ? t : 0;
-}
-
-function feedItem(row: FeedRow): ArticleRow {
-  return row.item;
-}
-
-/** 与后端 AggregateSearch 默认权重一致：收藏 10、点赞 5、浏览 1 */
-const POP_W_COLLECT = 10;
-const POP_W_LIKE = 5;
-const POP_W_VIEW = 1;
-/** 推荐模式下，0 回答求助的额外加权（不宜过大，避免压过高互动内容） */
-const RECOMMEND_ZERO_ANSWER_SCORE_BOOST = 50_000;
-
-/** 仅当接口明确返回 answer_count===0 时进综合区，避免有回答仍显示「0 回答」 */
-function filterZeroAnswerQuestions(list: ArticleRow[]): ArticleRow[] {
-  return list.filter(
-    (q) => typeof q.answer_count === 'number' && q.answer_count === 0,
-  );
-}
-
-function combinedSortTime(row: FeedRow, feedMode: PostFeedMode): number {
-  const t = rowTime(feedItem(row));
-  if (feedMode === 'recommend' && row.k === 'question') {
-    return t + 5 * 24 * 60 * 60 * 1000;
-  }
-  return t;
-}
-
-function popScore(item: ArticleRow): number {
-  const lc = Number(item.like_count) || 0;
-  const cc = Number(item.collect_count) || 0;
-  const vc = Number(item.view_count) || 0;
-  return cc * POP_W_COLLECT + lc * POP_W_LIKE + vc * POP_W_VIEW;
-}
-
-/** 综合区合并排序：最新=时间降序；热门/推荐=热度降序（与接口帖子序一致），再按时间打破平局 */
-function feedMergeSortKey(row: FeedRow, feedMode: PostFeedMode): number {
-  if (feedMode === 'latest') {
-    return combinedSortTime(row, feedMode);
-  }
-  let s = popScore(feedItem(row));
-  if (feedMode === 'recommend' && row.k === 'question') {
-    const ac = feedItem(row).answer_count;
-    if (typeof ac === 'number' && ac === 0) {
-      s += RECOMMEND_ZERO_ANSWER_SCORE_BOOST;
+/**
+ * 1:1 交织：尽量让两类内容轮流露出，保证滚动过程中帖子和回答都能被看到。
+ * 两侧顺序在各自接口侧已排好（按 feedMode），这里只管穿插。
+ */
+function interleave(posts: ArticleRow[], answers: AnswerRow[]): FeedRow[] {
+  const out: FeedRow[] = [];
+  const n = Math.max(posts.length, answers.length);
+  for (let i = 0; i < n; i++) {
+    if (i < posts.length) {
+      out.push({ k: 'post', item: posts[i] });
+    }
+    if (i < answers.length) {
+      out.push({ k: 'answer', item: answers[i] });
     }
   }
-  return s;
-}
-
-function mergeFeedCombined(
-  posts: ArticleRow[],
-  answers: AnswerRow[],
-  questions: ArticleRow[],
-  feedMode: PostFeedMode,
-): FeedRow[] {
-  const rows: FeedRow[] = [
-    ...posts.map((item) => ({ k: 'post' as const, item })),
-    ...answers.map((item) => ({ k: 'answer' as const, item })),
-    ...questions.map((item) => ({ k: 'question' as const, item })),
-  ];
-  rows.sort((a, b) => {
-    const diff = feedMergeSortKey(b, feedMode) - feedMergeSortKey(a, feedMode);
-    if (diff !== 0) {
-      return diff;
-    }
-    return combinedSortTime(b, feedMode) - combinedSortTime(a, feedMode);
-  });
-  return rows;
+  return out;
 }
 
 function thumbUri(item: ArticleRow): string | undefined {
@@ -124,400 +60,165 @@ function FeedThumb({ uri }: { uri?: string }) {
   if (!uri) {
     return <View style={styles.thumbPlaceholder} />;
   }
-  return (
-    <Image source={{ uri }} style={styles.thumb} resizeMode="cover" />
-  );
+  return <Image source={{ uri }} style={styles.thumb} resizeMode="cover" />;
 }
 
 export default function CommunityFeedScreen({ navigation }: any) {
-  const { feedMode, communityTab } = useCommunityFeedMode();
+  const { feedMode } = useCommunityFeedMode();
   const tabBarHeight = useBottomTabBarHeight();
-  const insets = useSafeAreaInsets();
+  /** 已看过的 ID 集合：点击卡片时打标，列表再次渲染即变灰字 */
+  const viewedPosts = useViewedSet('post');
+  const viewedAnswers = useViewedSet('answer');
+
   const [posts, setPosts] = useState<ArticleRow[]>([]);
   const [answers, setAnswers] = useState<AnswerRow[]>([]);
-  const [questions, setQuestions] = useState<ArticleRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [hasMorePost, setHasMorePost] = useState(true);
-  const [hasMoreAnswer, setHasMoreAnswer] = useState(true);
-  const [hasMoreQuestion, setHasMoreQuestion] = useState(true);
-  const [createSheetOpen, setCreateSheetOpen] = useState(false);
+
   const postPageRef = useRef(1);
   const answerPageRef = useRef(1);
-  const questionPageRef = useRef(1);
-  /** 综合区：求助接口累计拉取条数（未过滤），用于 hasMore */
-  const questionCumulativeRef = useRef(0);
-  const loadingMoreRef = useRef(false);
+  /** 推荐模式：后端会回显 refresh_token；翻页复用同一 token，保持顺序稳定 */
+  const postTokenRef = useRef<string | undefined>(undefined);
+  const answerTokenRef = useRef<string | undefined>(undefined);
   const hasMorePostRef = useRef(true);
   const hasMoreAnswerRef = useRef(true);
-  const hasMoreQuestionRef = useRef(true);
+  const loadingMoreRef = useRef(false);
+
+  const cacheKey = `community:feed:v10:${feedMode}`;
 
   useEffect(() => {
-    hasMorePostRef.current = hasMorePost;
-  }, [hasMorePost]);
-  useEffect(() => {
-    hasMoreAnswerRef.current = hasMoreAnswer;
-  }, [hasMoreAnswer]);
-  useEffect(() => {
-    hasMoreQuestionRef.current = hasMoreQuestion;
-  }, [hasMoreQuestion]);
-
-  const cacheKey = `community:feed:v9:${feedMode}:${communityTab}`;
-
-  const displayRows = useMemo((): FeedRow[] => {
-    switch (communityTab) {
-      case 'combined':
-        return mergeFeedCombined(posts, answers, questions, feedMode);
-      case 'post':
-        return posts.map((item) => ({ k: 'post' as const, item }));
-      case 'help':
-        return questions.map((item) => ({ k: 'question' as const, item }));
-      case 'answer':
-        return answers.map((item) => ({ k: 'answer' as const, item }));
-      default:
-        return [];
-    }
-  }, [communityTab, posts, answers, questions, feedMode]);
-
-  const emptyHint = useMemo(() => {
-    switch (communityTab) {
-      case 'combined':
-        return '暂无内容';
-      case 'post':
-        return '暂无帖子';
-      case 'help':
-        return '暂无求助';
-      case 'answer':
-        return '暂无回答';
-      default:
-        return '暂无内容';
-    }
-  }, [communityTab]);
+    // feedMode 切换时让 token 走最新值；load 里会重置
+    postTokenRef.current = undefined;
+    answerTokenRef.current = undefined;
+  }, [feedMode]);
 
   const loadInitial = useCallback(async () => {
+    const useLocalCache = feedMode !== 'recommend';
     let hadCache = false;
-    try {
-      const cached = await cacheGet<{
-        posts: ArticleRow[];
-        answers: AnswerRow[];
-        questions: ArticleRow[];
-        /** 综合区求助列表接口累计拉取条数 */
-        questionCumulativeRaw?: number;
-      }>(cacheKey);
-      if (
-        cached?.posts?.length ||
-        cached?.answers?.length ||
-        cached?.questions?.length
-      ) {
-        hadCache = true;
-        setPosts(cached.posts || []);
-        setAnswers(cached.answers || []);
-        setQuestions(cached.questions || []);
-        questionCumulativeRef.current = cached.questionCumulativeRaw ?? 0;
-        setLoading(false);
+    if (useLocalCache) {
+      try {
+        const cached = await cacheGet<{
+          posts: ArticleRow[];
+          answers: AnswerRow[];
+        }>(cacheKey);
+        if (cached?.posts?.length || cached?.answers?.length) {
+          hadCache = true;
+          setPosts(cached.posts || []);
+          setAnswers(cached.answers || []);
+          setLoading(false);
+        }
+      } catch {
+        /* noop */
       }
-    } catch {
-      /* noop */
     }
     if (!hadCache) {
       setLoading(true);
     }
     postPageRef.current = 1;
     answerPageRef.current = 1;
-    questionPageRef.current = 1;
+    postTokenRef.current = undefined;
+    answerTokenRef.current = undefined;
+    hasMorePostRef.current = true;
+    hasMoreAnswerRef.current = true;
     loadingMoreRef.current = false;
 
-    const tab = communityTab;
-
     try {
-      if (tab === 'combined') {
-        const [postRes, answerRes, questionRes] = await Promise.allSettled([
-          listPosts(1, PAGE_SIZE, { mode: feedMode }),
-          listAnswers(1, PAGE_SIZE),
-          listQuestions(1, PAGE_SIZE),
-        ]);
-        let pl: ArticleRow[] = [];
-        let prTotal: number | undefined;
-        if (postRes.status === 'fulfilled') {
-          const pr = postRes.value;
-          pl = pr.list ?? [];
-          prTotal = pr.total;
-        }
-        let al: AnswerRow[] = [];
-        let arTotal: number | undefined;
-        if (answerRes.status === 'fulfilled') {
-          const ar = answerRes.value;
-          al = ar.list ?? [];
-          arTotal = ar.total;
-        }
-        let ql: ArticleRow[] = [];
-        let qrTotal: number | undefined;
-        let rawQLen = 0;
-        if (questionRes.status === 'fulfilled') {
-          const qr = questionRes.value;
-          const raw = qr.list ?? [];
-          rawQLen = raw.length;
-          questionCumulativeRef.current = raw.length;
-          ql = filterZeroAnswerQuestions(raw);
-          qrTotal = qr.total;
-        }
-        setPosts(pl);
-        setAnswers(al);
-        setQuestions(ql);
-        const mp = hasMorePages(pl.length, PAGE_SIZE, prTotal, pl.length);
-        const ma = hasMorePages(al.length, PAGE_SIZE, arTotal, al.length);
-        const mq = hasMorePages(
-          rawQLen,
-          PAGE_SIZE,
-          qrTotal,
-          questionCumulativeRef.current,
-        );
-        setHasMorePost(mp);
-        setHasMoreAnswer(ma);
-        setHasMoreQuestion(mq);
-        hasMorePostRef.current = mp;
-        hasMoreAnswerRef.current = ma;
-        hasMoreQuestionRef.current = mq;
-        await cacheSet(cacheKey, {
-          posts: pl,
-          answers: al,
-          questions: ql,
-          questionCumulativeRaw: questionCumulativeRef.current,
-        });
-      } else if (tab === 'post') {
-        const pr = await listPosts(1, PAGE_SIZE, { mode: feedMode });
-        const pl = pr.list ?? [];
-        setPosts(pl);
-        setAnswers([]);
-        setQuestions([]);
-        const mp = hasMorePages(pl.length, PAGE_SIZE, pr.total, pl.length);
-        setHasMorePost(mp);
-        setHasMoreAnswer(false);
-        setHasMoreQuestion(false);
-        hasMorePostRef.current = mp;
-        hasMoreAnswerRef.current = false;
-        hasMoreQuestionRef.current = false;
-        await cacheSet(cacheKey, { posts: pl, answers: [], questions: [] });
-      } else if (tab === 'help') {
-        const qr = await listQuestions(1, PAGE_SIZE);
-        const ql = qr.list ?? [];
-        setPosts([]);
-        setAnswers([]);
-        setQuestions(ql);
-        const mq = hasMorePages(ql.length, PAGE_SIZE, qr.total, ql.length);
-        setHasMorePost(false);
-        setHasMoreAnswer(false);
-        setHasMoreQuestion(mq);
-        hasMorePostRef.current = false;
-        hasMoreAnswerRef.current = false;
-        hasMoreQuestionRef.current = mq;
-        await cacheSet(cacheKey, { posts: [], answers: [], questions: ql });
-      } else {
-        const ar = await listAnswers(1, PAGE_SIZE);
-        const al = ar.list ?? [];
-        setPosts([]);
-        setAnswers(al);
-        setQuestions([]);
-        const ma = hasMorePages(al.length, PAGE_SIZE, ar.total, al.length);
-        setHasMorePost(false);
-        setHasMoreAnswer(ma);
-        setHasMoreQuestion(false);
-        hasMorePostRef.current = false;
-        hasMoreAnswerRef.current = ma;
-        hasMoreQuestionRef.current = false;
-        await cacheSet(cacheKey, { posts: [], answers: al, questions: [] });
+      const [pRes, aRes] = await Promise.all([
+        listPosts(1, PAGE_SIZE, { mode: feedMode }),
+        listAnswers(1, PAGE_SIZE, { mode: feedMode }),
+      ]);
+      const pl = pRes.list ?? [];
+      const al = aRes.list ?? [];
+      postTokenRef.current = pRes.refresh_token;
+      answerTokenRef.current = aRes.refresh_token;
+      setPosts(pl);
+      setAnswers(al);
+      hasMorePostRef.current = hasMorePages(pl.length, PAGE_SIZE, pRes.total, pl.length);
+      hasMoreAnswerRef.current = hasMorePages(al.length, PAGE_SIZE, aRes.total, al.length);
+      if (useLocalCache) {
+        await cacheSet(cacheKey, { posts: pl, answers: al });
       }
     } catch {
       if (!hadCache) {
         setPosts([]);
         setAnswers([]);
-        setQuestions([]);
       }
-      setHasMorePost(false);
-      setHasMoreAnswer(false);
-      setHasMoreQuestion(false);
       hasMorePostRef.current = false;
       hasMoreAnswerRef.current = false;
-      hasMoreQuestionRef.current = false;
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [cacheKey, feedMode, communityTab]);
+  }, [cacheKey, feedMode]);
 
   const loadMore = useCallback(async () => {
-    const tab = communityTab;
     if (loadingMoreRef.current) {
       return;
     }
-    if (tab === 'combined') {
-      if (
-        !hasMorePostRef.current &&
-        !hasMoreAnswerRef.current &&
-        !hasMoreQuestionRef.current
-      ) {
-        return;
-      }
-    } else if (tab === 'post' && !hasMorePostRef.current) {
-      return;
-    } else if (tab === 'help' && !hasMoreQuestionRef.current) {
-      return;
-    } else if (tab === 'answer' && !hasMoreAnswerRef.current) {
+    if (!hasMorePostRef.current && !hasMoreAnswerRef.current) {
       return;
     }
-
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
       const tasks: Promise<void>[] = [];
-
-      if (tab === 'combined') {
-        if (hasMorePostRef.current) {
-          const next = postPageRef.current + 1;
-          tasks.push(
-            (async () => {
-              const pr = await listPosts(next, PAGE_SIZE, { mode: feedMode });
-              const rows = pr.list || [];
-              setPosts((prev) => {
-                const mergedPosts = mergeById(prev, rows);
-                const more = hasMorePages(
-                  rows.length,
-                  PAGE_SIZE,
-                  pr.total,
-                  mergedPosts.length,
-                );
-                setHasMorePost(more);
-                hasMorePostRef.current = more;
-                return mergedPosts;
-              });
-              if (rows.length > 0) {
-                postPageRef.current = next;
-              }
-            })(),
-          );
-        }
-        if (hasMoreAnswerRef.current) {
-          const nextA = answerPageRef.current + 1;
-          tasks.push(
-            (async () => {
-              const ar = await listAnswers(nextA, PAGE_SIZE);
-              const rows = ar.list || [];
-              setAnswers((prev) => {
-                const mergedAns = mergeById(prev, rows);
-                const more = hasMorePages(
-                  rows.length,
-                  PAGE_SIZE,
-                  ar.total,
-                  mergedAns.length,
-                );
-                setHasMoreAnswer(more);
-                hasMoreAnswerRef.current = more;
-                return mergedAns;
-              });
-              if (rows.length > 0) {
-                answerPageRef.current = nextA;
-              }
-            })(),
-          );
-        }
-        if (hasMoreQuestionRef.current) {
-          const nextQ = questionPageRef.current + 1;
-          tasks.push(
-            (async () => {
-              const qr = await listQuestions(nextQ, PAGE_SIZE);
-              const rows = qr.list || [];
-              questionCumulativeRef.current += rows.length;
-              setQuestions((prev) => {
-                const filtered = filterZeroAnswerQuestions(rows);
-                const mergedQ = mergeById(prev, filtered);
-                const more = hasMorePages(
-                  rows.length,
-                  PAGE_SIZE,
-                  qr.total,
-                  questionCumulativeRef.current,
-                );
-                setHasMoreQuestion(more);
-                hasMoreQuestionRef.current = more;
-                return mergedQ;
-              });
-              if (rows.length > 0) {
-                questionPageRef.current = nextQ;
-              }
-            })(),
-          );
-        }
-      } else if (tab === 'post' && hasMorePostRef.current) {
+      if (hasMorePostRef.current) {
         const next = postPageRef.current + 1;
         tasks.push(
           (async () => {
-            const pr = await listPosts(next, PAGE_SIZE, { mode: feedMode });
-            const rows = pr.list || [];
+            const r = await listPosts(next, PAGE_SIZE, {
+              mode: feedMode,
+              refreshToken: postTokenRef.current,
+            });
+            if (r.refresh_token) {
+              postTokenRef.current = r.refresh_token;
+            }
+            const rows = r.list ?? [];
             setPosts((prev) => {
-              const mergedPosts = mergeById(prev, rows);
-              const more = hasMorePages(
+              const merged = mergeById(prev, rows);
+              hasMorePostRef.current = hasMorePages(
                 rows.length,
                 PAGE_SIZE,
-                pr.total,
-                mergedPosts.length,
+                r.total,
+                merged.length,
               );
-              setHasMorePost(more);
-              hasMorePostRef.current = more;
-              return mergedPosts;
+              return merged;
             });
             if (rows.length > 0) {
               postPageRef.current = next;
             }
           })(),
         );
-      } else if (tab === 'help' && hasMoreQuestionRef.current) {
-        const nextQ = questionPageRef.current + 1;
+      }
+      if (hasMoreAnswerRef.current) {
+        const next = answerPageRef.current + 1;
         tasks.push(
           (async () => {
-            const qr = await listQuestions(nextQ, PAGE_SIZE);
-            const rows = qr.list || [];
-            setQuestions((prev) => {
-              const mergedQ = mergeById(prev, rows);
-              const more = hasMorePages(
-                rows.length,
-                PAGE_SIZE,
-                qr.total,
-                mergedQ.length,
-              );
-              setHasMoreQuestion(more);
-              hasMoreQuestionRef.current = more;
-              return mergedQ;
+            const r = await listAnswers(next, PAGE_SIZE, {
+              mode: feedMode,
+              refreshToken: answerTokenRef.current,
             });
-            if (rows.length > 0) {
-              questionPageRef.current = nextQ;
+            if (r.refresh_token) {
+              answerTokenRef.current = r.refresh_token;
             }
-          })(),
-        );
-      } else if (tab === 'answer' && hasMoreAnswerRef.current) {
-        const nextA = answerPageRef.current + 1;
-        tasks.push(
-          (async () => {
-            const ar = await listAnswers(nextA, PAGE_SIZE);
-            const rows = ar.list || [];
+            const rows = r.list ?? [];
             setAnswers((prev) => {
-              const mergedAns = mergeById(prev, rows);
-              const more = hasMorePages(
+              const merged = mergeById(prev, rows);
+              hasMoreAnswerRef.current = hasMorePages(
                 rows.length,
                 PAGE_SIZE,
-                ar.total,
-                mergedAns.length,
+                r.total,
+                merged.length,
               );
-              setHasMoreAnswer(more);
-              hasMoreAnswerRef.current = more;
-              return mergedAns;
+              return merged;
             });
             if (rows.length > 0) {
-              answerPageRef.current = nextA;
+              answerPageRef.current = next;
             }
           })(),
         );
       }
-
       await Promise.all(tasks);
     } catch {
       /* keep */
@@ -525,7 +226,7 @@ export default function CommunityFeedScreen({ navigation }: any) {
       loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [feedMode, communityTab]);
+  }, [feedMode]);
 
   useFocusEffect(
     useCallback(() => {
@@ -533,63 +234,44 @@ export default function CommunityFeedScreen({ navigation }: any) {
     }, [loadInitial]),
   );
 
+  const rows = interleave(posts, answers);
   const fabBottom = tabBarHeight + 12;
-  const sheetBottom = insets.bottom;
 
   const renderItem = ({ item: row }: { item: FeedRow }) => {
     if (row.k === 'post') {
       const item = row.item;
+      const viewed = viewedPosts.has(item.id) || !!item.is_viewed;
       return (
         <TouchableOpacity
           style={styles.card}
           activeOpacity={0.8}
-          onPress={() => navigation.navigate('PostDetail', { id: item.id })}>
+          onPress={() => {
+            markViewed('post', item.id);
+            navigation.navigate('PostDetail', { id: item.id });
+          }}>
           <View style={styles.cardRow}>
             <FeedThumb uri={thumbUri(item)} />
             <View style={styles.cardBody}>
               <ArticleListTags kind="post" schoolId={item.school_id} compact />
-              <Text style={styles.cardTitle} numberOfLines={2}>
+              <Text
+                style={[styles.cardTitle, viewed && styles.viewedText]}
+                numberOfLines={2}>
                 {item.title || item.content?.slice(0, 60)}
               </Text>
               {item.content?.trim() ? (
-                <Text style={styles.preview} numberOfLines={3}>
+                <Text
+                  style={[styles.preview, viewed && styles.viewedSubText]}
+                  numberOfLines={3}>
                   {item.content.trim()}
                 </Text>
               ) : null}
-              <Text style={styles.cardMeta}>
-                {item.author?.username} · {item.like_count ?? 0} 赞
-                {item.view_count != null ? ` · ${item.view_count} 浏览` : ''}
-              </Text>
-            </View>
-          </View>
-        </TouchableOpacity>
-      );
-    }
-
-    if (row.k === 'question') {
-      const item = row.item;
-      const title = item.title?.trim() || item.content?.slice(0, 40) || '求助';
-      return (
-        <TouchableOpacity
-          style={styles.card}
-          activeOpacity={0.8}
-          onPress={() =>
-            navigation.navigate('QuestionDetail', { id: item.id })
-          }>
-          <View style={styles.cardRow}>
-            <FeedThumb uri={thumbUri(item)} />
-            <View style={styles.cardBody}>
-              <ArticleListTags kind="question" schoolId={item.school_id} compact />
-              <Text style={styles.qTitle} numberOfLines={2}>
-                {title}
-              </Text>
-              <Text style={styles.preview} numberOfLines={4}>
-                {item.content?.trim() || '（无正文）'}
-              </Text>
-              <Text style={styles.cardMeta}>
-                {item.author?.username ?? '用户'} · 求助 ·{' '}
-                {item.answer_count ?? 0} 回答
-              </Text>
+              <View style={styles.cardAuthorRow}>
+                <AuthorChip author={item.author as any} size="xs" />
+                <Text style={[styles.cardMeta, viewed && styles.viewedSubText]}>
+                  {' · '}{item.like_count ?? 0} 赞
+                  {item.view_count != null ? ` · ${item.view_count} 浏览` : ''}
+                </Text>
+              </View>
             </View>
           </View>
         </TouchableOpacity>
@@ -598,11 +280,15 @@ export default function CommunityFeedScreen({ navigation }: any) {
 
     const item = row.item;
     const qTitle = item.parent_question?.title?.trim() || '求助';
+    const viewed = viewedAnswers.has(item.id) || !!item.is_viewed;
     return (
       <TouchableOpacity
         style={styles.card}
         activeOpacity={0.8}
-        onPress={() => navigation.navigate('AnswerDetail', { id: item.id })}>
+        onPress={() => {
+          markViewed('answer', item.id);
+          navigation.navigate('AnswerDetail', { id: item.id });
+        }}>
         <View style={styles.cardRow}>
           <FeedThumb uri={thumbUri(item)} />
           <View style={styles.cardBody}>
@@ -611,15 +297,22 @@ export default function CommunityFeedScreen({ navigation }: any) {
               schoolId={item.school_id ?? item.parent_question?.school_id}
               compact
             />
-            <Text style={styles.qTitle} numberOfLines={2}>
+            <Text
+              style={[styles.qTitle, viewed && styles.viewedText]}
+              numberOfLines={2}>
               {qTitle}
             </Text>
-            <Text style={styles.preview} numberOfLines={4}>
+            <Text
+              style={[styles.preview, viewed && styles.viewedSubText]}
+              numberOfLines={4}>
               {item.content?.trim() || '（无正文）'}
             </Text>
-            <Text style={styles.cardMeta}>
-              {item.author?.username ?? '用户'} · 回答
-            </Text>
+            <View style={styles.cardAuthorRow}>
+              <AuthorChip author={item.author as any} size="xs" />
+              <Text style={[styles.cardMeta, viewed && styles.viewedSubText]}>
+                {' · '}{item.like_count ?? 0} 赞
+              </Text>
+            </View>
           </View>
         </View>
       </TouchableOpacity>
@@ -630,18 +323,14 @@ export default function CommunityFeedScreen({ navigation }: any) {
     <Screen scroll={false}>
       <View style={styles.wrap}>
         <LoadingMask
-          visible={loading && displayRows.length === 0}
+          visible={loading && rows.length === 0}
           hint="正在加载社区…"
         />
         <FlatList
           style={styles.flex}
-          data={displayRows}
+          data={rows}
           keyExtractor={(row) =>
-            row.k === 'post'
-              ? `p-${row.item.id}`
-              : row.k === 'question'
-                ? `q-${row.item.id}`
-                : `a-${row.item.id}`
+            row.k === 'post' ? `p-${row.item.id}` : `a-${row.item.id}`
           }
           refreshControl={
             <RefreshControl
@@ -665,56 +354,15 @@ export default function CommunityFeedScreen({ navigation }: any) {
             ) : null
           }
           ListEmptyComponent={
-            <Text style={styles.empty}>{emptyHint}</Text>
+            !loading ? <Text style={styles.empty}>暂无内容</Text> : null
           }
           renderItem={renderItem}
         />
 
         <CreateFab
-          onPress={() => setCreateSheetOpen(true)}
-          accessibilityLabel="发布"
+          onPress={() => navigation.navigate('CreateDraft')}
+          accessibilityLabel="发帖"
         />
-
-        <Modal
-          visible={createSheetOpen}
-          animationType="slide"
-          transparent
-          onRequestClose={() => setCreateSheetOpen(false)}>
-          <View style={styles.sheetWrap}>
-            <Pressable
-              style={styles.sheetBackdrop}
-              onPress={() => setCreateSheetOpen(false)}
-            />
-            <View style={[styles.sheetCard, { paddingBottom: sheetBottom + 16 }]}>
-              <View style={styles.sheetGrabber} />
-              <Text style={styles.sheetTitle}>发布内容</Text>
-              <TouchableOpacity
-                style={styles.sheetRow}
-                onPress={() => {
-                  setCreateSheetOpen(false);
-                  navigation.navigate('CreateDraft');
-                }}
-                activeOpacity={0.85}>
-                <Text style={styles.sheetRowText}>创建帖子</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.sheetRow}
-                onPress={() => {
-                  setCreateSheetOpen(false);
-                  navigation.navigate('CreateQuestion');
-                }}
-                activeOpacity={0.85}>
-                <Text style={styles.sheetRowText}>发布求助</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.sheetCancel}
-                onPress={() => setCreateSheetOpen(false)}
-                activeOpacity={0.85}>
-                <Text style={styles.sheetCancelText}>取消</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </Modal>
       </View>
     </Screen>
   );
@@ -733,11 +381,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
-  cardRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 12,
-  },
+  cardRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
   thumb: {
     width: 88,
     height: 88,
@@ -766,51 +410,9 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: 4,
   },
-  cardMeta: { marginTop: 8, fontSize: 12, color: colors.textMuted },
+  cardMeta: { fontSize: 12, color: colors.textMuted },
+  cardAuthorRow: { marginTop: 8, flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' },
+  viewedText: { color: colors.textMuted, fontWeight: '500' },
+  viewedSubText: { color: colors.textMuted },
   empty: { textAlign: 'center', color: colors.textMuted, marginTop: 40 },
-  sheetWrap: {
-    flex: 1,
-    justifyContent: 'flex-end',
-  },
-  sheetBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: colors.overlay,
-  },
-  sheetCard: {
-    backgroundColor: colors.surface,
-    borderTopLeftRadius: radius.lg,
-    borderTopRightRadius: radius.lg,
-    paddingHorizontal: space.md,
-    paddingTop: 8,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-  },
-  sheetGrabber: {
-    alignSelf: 'center',
-    width: 40,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: colors.border,
-    marginBottom: 12,
-  },
-  sheetTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: colors.textMuted,
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  sheetRow: {
-    paddingVertical: 16,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
-  },
-  sheetRowText: { fontSize: 17, color: colors.text, textAlign: 'center' },
-  sheetCancel: { paddingVertical: 16, marginTop: 4 },
-  sheetCancelText: {
-    fontSize: 16,
-    color: colors.textMuted,
-    textAlign: 'center',
-    fontWeight: '600',
-  },
 });

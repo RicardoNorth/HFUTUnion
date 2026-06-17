@@ -32,6 +32,9 @@ import Screen from '../components/Screen';
 import LoadingMask from '../components/LoadingMask';
 import AnswerCommentsPanel from '../components/AnswerCommentsPanel';
 import { colors, radius, space } from '../theme/colors';
+import { markViewed } from '../utils/viewedTracker';
+import { formatAuthorName } from '../utils/authorName';
+import AuthorChip from '../components/AuthorChip';
 
 const EXT_A = 3;
 
@@ -184,9 +187,11 @@ function AnswerSlide({
           </View>
         ) : null}
 
+        <View style={{ marginTop: 8 }}>
+          <AuthorChip author={answer.author as any} size="md" />
+        </View>
         <Text style={slideStyles.meta}>
-          {answer.author?.username ?? '用户'} · {answer.like_count ?? 0} 赞 ·{' '}
-          {answer.collect_count ?? 0} 藏 · {answer.comment_count ?? 0} 评
+          {answer.like_count ?? 0} 赞 · {answer.collect_count ?? 0} 藏 · {answer.comment_count ?? 0} 评
           {answer.view_count != null ? ` · ${answer.view_count} 浏览` : ''}
         </Text>
 
@@ -312,6 +317,13 @@ export default function AnswerDetailScreen({ route }: any) {
       title: t.length > 20 ? `${t.slice(0, 20)}…` : t,
     });
   }, [navigation, qTitle]);
+
+  // 切换到任一回答时即打标；用户在本页纵滑阅读多条，逐一记录才准确
+  useEffect(() => {
+    if (currentAnswerId && Number.isFinite(currentAnswerId) && currentAnswerId > 0) {
+      markViewed('answer', currentAnswerId);
+    }
+  }, [currentAnswerId]);
 
   useEffect(() => {
     let cancelled = false;
